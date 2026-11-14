@@ -1,0 +1,139 @@
+name: Build and Release macOS ARM64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to create or update (e.g. v0.1.0)'
+        required: false
+        default: 'v0.1.0'
+      dxengine_ref:
+        description: 'captain-courageous/DXEngine branch or tag to build (defaults to matching tag or macos-arm64-metal)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout macDeusEx
+        uses: actions/checkout@v4
+
+      - name: Resolve build refs
+        id: refs
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.release_tag }}" ]; then
+            TAG="${{ inputs.release_tag }}"
+          elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="v0.1.0"
+          fi
+          DXREF="${{ inputs.dxengine_ref }}"
+          if [ -z "$DXREF" ]; then
+            if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+              DXREF="${GITHUB_REF_NAME}"
+            else
+              DXREF="macos-arm64-metal"
+            fi
+          fi
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "dxengine_ref=$DXREF" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout captain-courageous/DXEngine
+        uses: actions/checkout@v4
+        with:
+          repository: captain-courageous/DXEngine
+          ref: ${{ steps.refs.outputs.dxengine_ref }}
+          path: DXEngine
+
+      - name: Install Ninja
+        run: command -v ninja >/dev/null 2>&1 || brew install ninja
+
+      - name: Configure and build DXEngine (arm64 Metal + Cocoa)
+        run: |
+          cmake -S DXEngine -B DXEngine/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DENABLE_SDL2=OFF \
+            -DENABLE_SDL3=OFF
+          cmake --build DXEngine/build --target DXEngine
+
+      - name: Package and verify engine archives
+        env:
+          DEUSEX_VERSION: ${{ steps.refs.outputs.version }}
+          DEUSEX_MACOS_MIN: '14.0'
+        run: |
+          file DXEngine/build/DXEngine.app/Contents/MacOS/DXEngine
+          python3 DXEngine/NativePort/package_app.py
+          cd DXEngine/dist/macDeusEx-release
+          shasum -a 256 -c SHA256SUMS.txt
+          tar -tzf DeusEx-macos-arm64.tar.gz | grep -q 'Contents/MacOS/DXEngine$'
+          tar -tzf DeusEx-macos-arm64.tar.gz | grep -q 'Contents/Resources/DXEngine.pk3$'
+          tar -tzf DeusEx-macos-arm64.tar.gz | grep -q 'Contents/Frameworks/libopenal.1.dylib$'
+          ! tar -tzf DeusEx-macos-arm64.tar.gz | grep -qiE '\.(exe|dll|u|dx|utx|uax|umx|ini|icns)$'
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
+          VERSION: ${{ steps.refs.outputs.version }}
+          DXREF: ${{ steps.refs.outputs.dxengine_ref }}
+        run: |
+          DXSHA="$(git -C DXEngine rev-parse HEAD)"
+          SHORT_SHA="$(git -C DXEngine rev-parse --short HEAD)"
+          REPO="${GITHUB_REPOSITORY}"
+          cd DXEngine/dist/macDeusEx-release
+          python3 - <<PY
+          import os, textwrap
+          tag = os.environ["RELEASE_TAG"]
+          dxref = os.environ["DXREF"]
+          dxsha = "$DXSHA"
+          short_sha = "$SHORT_SHA"
+          with open("release_notes.md", "w") as f:
+              f.write(textwrap.dedent(f"""\
+              Native Apple Silicon (\`arm64\`) Metal + Cocoa build of **DXEngine** for Deus Ex (GOTY 1.112fm).
+
+              - **Version:** \`{tag}\` (min macOS 14.0, Apple Silicon)
+              - **Source:** [\`captain-courageous/DXEngine\` @ \`{dxref}\` (\`{short_sha}\`)](https://github.com/captain-courageous/DXEngine/commit/{dxsha})
+              - **Matching Source Archive:** \`Deus-Ex-Mac-Source.tar.gz\` (zlib + LGPL v2 OpenAL Soft + BSD-3 third-party sources)
+              - **Checksums:** Verified automatically by \`quick-install.sh\` against \`SHA256SUMS.txt\`
+
+              ### Quick Install (Terminal)
+              \`\`\`bash
+              curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash
+              \`\`\`
+
+              ### Credits
+              Built upon [JuggyMcNutty/port-ex-machina](https://github.com/JuggyMcNutty/port-ex-machina), [Alyx-ML/DeusEX-MacOS-Metal](https://github.com/Alyx-ML/DeusEX-MacOS-Metal), and [SurrealEngine](https://github.com/dpjudas/SurrealEngine). Requires your own legally owned copy of Deus Ex GOTY.
+              """))
+          PY
+
+          if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" --repo "$REPO" --clobber \
+              DeusEx-macos-arm64.tar.gz \
+              DeusEx-macos-arm64.zip \
+              Deus-Ex-Mac-Source.tar.gz \
+              SHA256SUMS.txt \
+              version.sha
+            gh release edit "$RELEASE_TAG" --repo "$REPO" --notes-file release_notes.md
+          else
+            gh release create "$RELEASE_TAG" --repo "$REPO" \
+              --title "Deus Ex Native macOS $RELEASE_TAG" \
+              --notes-file release_notes.md \
+              DeusEx-macos-arm64.tar.gz \
+              DeusEx-macos-arm64.zip \
+              Deus-Ex-Mac-Source.tar.gz \
+              SHA256SUMS.txt \
+              version.sha
+          fi
