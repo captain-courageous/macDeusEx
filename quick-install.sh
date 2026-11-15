@@ -1055,23 +1055,82 @@ with open(out_path, "wb") as f:
 PY
 }
 
+shape_macos_icon() {
+	local png=$1
+	command -v osascript >/dev/null 2>&1 || return 0
+	osascript -l JavaScript - "$png" <<'JXA' >/dev/null 2>&1 || true
+ObjC.import("Cocoa");
+function run(argv) {
+	var p = argv[0];
+	var src = $.NSImage.alloc.initWithContentsOfFile(p);
+	if (!src || !src.TIFFRepresentation) return;
+	var srcRep = $.NSBitmapImageRep.imageRepWithData(src.TIFFRepresentation);
+	var pw = srcRep.pixelsWide, ph = srcRep.pixelsHigh;
+	if (pw < 32 || ph < 32) return;
+	var cy = Math.floor(ph / 2);
+	var trimFrac = 0.0;
+	if (srcRep.colorAtXY(0, 0).alphaComponent < 0.1 && srcRep.colorAtXY(Math.floor(pw / 2), cy).alphaComponent > 0.9) {
+		for (var x = 0; x < Math.floor(pw / 2); x++) {
+			if (srcRep.colorAtXY(x, cy).alphaComponent > 0.9) {
+				trimFrac = (x + Math.round(pw * 0.044)) / pw;
+				break;
+			}
+		}
+	}
+	var size = 1024;
+	var canvas = $.NSImage.alloc.initWithSize($.NSMakeSize(size, size));
+	canvas.lockFocus;
+	$.NSGraphicsContext.currentContext.imageInterpolation = $.NSImageInterpolationHigh;
+	var rect = $.NSMakeRect(0, 0, size, size);
+	$.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius(rect, 224, 224).addClip;
+	if (trimFrac > 0 && trimFrac < 0.35) {
+		$.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.015, 0.035, 0.075, 1.0).setFill;
+		$.NSRectFill(rect);
+		var cropFrac = 1.0 - 2.0 * trimFrac;
+		var drawSize = (size * 1.30) / cropFrac;
+		var offX = (size - drawSize) / 2.0;
+		var offY = (size - drawSize) / 2.0 - size * 0.025;
+		var r = (drawSize * cropFrac) * 0.495;
+		var cx = size / 2.0, cY = size / 2.0 - size * 0.025;
+		$.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(cx - r, cY - r, r * 2, r * 2)).addClip;
+		src.drawInRectFromRectOperationFraction($.NSMakeRect(offX, offY, drawSize, drawSize), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+	} else {
+		src.drawInRectFromRectOperationFraction(rect, $.NSZeroRect, $.NSCompositingOperationSourceOver, 1.0);
+	}
+	var outRep = $.NSBitmapImageRep.alloc.initWithFocusedViewRect(rect);
+	canvas.unlockFocus;
+	var data = outRep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $({}));
+	data.writeToFileAtomically(p, true);
+}
+JXA
+}
+
 install_original_icon() {
 	local out="$APP/Contents/Resources/DeusEx.icns"
 	command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1 || {
 		[ -n "$EXISTING_ICNS" ] && [ -f "$EXISTING_ICNS" ] && cp "$EXISTING_ICNS" "$out" && ok "Preserved app icon"
 		return 0
 	}
-	local ico="" src_label="" exe=""
+	local ico="" src_label="" exe="" cand=""
 	ico="$(find -H "$ASSET_SRC" -maxdepth 2 -iname 'goggame-*.ico' -print -quit 2>/dev/null || true)"
+	if [ -z "$ico" ] && [ -n "$EXISTING_APP" ] && [ "$ASSET_SRC" = "$EXISTING_APP/Contents/Resources/GameData" ]; then
+		collect_install_candidates
+		for cand in "${CAND_DIRS[@]}"; do
+			[ -d "$cand" ] || continue
+			ico="$(find -H "$cand" -maxdepth 2 -iname 'goggame-*.ico' -print -quit 2>/dev/null || true)"
+			[ -f "$ico" ] && break || ico=""
+		done
+	fi
+	if [ -z "$ico" ] && [ -n "$EXISTING_ICNS" ] && [ -f "$EXISTING_ICNS" ]; then
+		cp "$EXISTING_ICNS" "$out"
+		ok "Preserved existing game icon"
+		return 0
+	fi
 	[ -n "$ico" ] || [ -z "$SRC_HELP" ] || ico="$(find -H "$SRC_HELP" -maxdepth 1 -iname 'DeusEx.ico' -print -quit 2>/dev/null || true)"
 	[ -n "$ico" ] || ico="$(find -H "$ASSET_SRC" -maxdepth 2 -iname 'DeusEx.ico' -print -quit 2>/dev/null || true)"
 	[ -n "$ico" ] || ico="$(find -H "$ASSET_SRC" -maxdepth 1 -iname '*.ico' ! -iname 'gog.ico' ! -iname 'support.ico' ! -iname 'unins*.ico' -print -quit 2>/dev/null || true)"
 	if [ -f "$ico" ]; then
 		src_label="$(basename "$ico")"
-	elif [ -n "$EXISTING_ICNS" ] && [ -f "$EXISTING_ICNS" ]; then
-		cp "$EXISTING_ICNS" "$out"
-		ok "Preserved existing game icon"
-		return 0
 	else
 		exe="$(find_ci_file "$SRC_SYS" "deusex.exe" || true)"
 		if [ -n "$exe" ] && extract_pe_icon "$exe" "$TMP/deusex_pe.ico"; then
@@ -1083,6 +1142,7 @@ install_original_icon() {
 
 	local base="$TMP/orig_icon.png" setdir="$TMP/DeusEx.iconset"
 	sips -s format png "$ico" --out "$base" >/dev/null 2>&1 || return 0
+	shape_macos_icon "$base"
 	rm -rf "$setdir"
 	mkdir -p "$setdir"
 	sips -z 16 16     "$base" --out "$setdir/icon_16x16.png" >/dev/null 2>&1 || return 0
