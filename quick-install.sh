@@ -428,6 +428,17 @@ collect_install_candidates() {
 $(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\([^"]*\)".*/\1/p' "$vdf")
 EOF
 	fi
+	# Manual depot downloads from the Steam console (`download_depot 6910 6911`),
+	# needed on macOS because Steam won't install the Windows-only app.
+	local depot
+	for depot in \
+		"$HOME/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content"/app_*/depot_* \
+		"$HOME/Library/Application Support/Steam/steamapps/content"/app_*/depot_*
+	do
+		if [ -d "$depot" ]; then
+			CAND_DIRS+=("$depot")
+		fi
+	done
 	local bottle
 	for bottle in \
 		"$HOME/Library/Application Support/CrossOver/Bottles"/* \
@@ -585,7 +596,9 @@ elif [ -z "$ASSET_SRC" ]; then
 
 	if [ -z "$ASSET_SRC" ]; then
 		die "Deus Ex GOTY game files not found" \
-			"Install Deus Ex via Steam/GOG or place the folder (System, Maps, Textures, Sounds, Music) in ~/Downloads," \
+			"Steam on macOS won't install Deus Ex (Windows-only). Either:" \
+			"  - open steam://open/console and run: download_depot 6910 6911  (then re-run this script), or" \
+			"  - install it via GOG/CrossOver/Whisky, or copy the game folder (System, Maps, Textures, Sounds, Music) to ~/Downloads," \
 			"or pass its path explicitly with --game:" \
 			"  curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/quick-install.sh | bash -s -- --game ~/path/to/\"Deus Ex GOTY\""
 	fi
