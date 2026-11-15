@@ -97,19 +97,9 @@ jobs:
           python3 - <<PY
           import os, pathlib, textwrap
           tag = os.environ["RELEASE_TAG"]
-          dxref = os.environ["DXREF"]
-          dxsha = "$DXSHA"
-          short_sha = "$SHORT_SHA"
           notes_path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "notes" / f"{tag}.md"
-          extra = ("\n" + notes_path.read_text().strip() + "\n") if notes_path.is_file() else ""
-          body = textwrap.dedent(f"""\
-              Native Apple Silicon (\`arm64\`) Metal + Cocoa build of **DXEngine** for Deus Ex (GOTY 1.112fm) & Deus Ex: Revision.
-
-              - **Version:** \`{tag}\` (min macOS 14.0, Apple Silicon)
-              - **Source:** [\`captain-courageous/DXEngine\` @ \`{dxref}\` (\`{short_sha}\`)](https://github.com/captain-courageous/DXEngine/commit/{dxsha})
-              - **Matching Source Archive:** \`Deus-Ex-Mac-Source.tar.gz\` (zlib + LGPL v2 OpenAL Soft + BSD-3 third-party sources)
-              - **Checksums:** Verified automatically by \`quick-install.sh\` against \`SHA256SUMS.txt\`
-              """) + extra + textwrap.dedent("""\
+          extra = (notes_path.read_text().strip() + "\n") if notes_path.is_file() else ""
+          body = extra + textwrap.dedent("""\
 
               ### Quick Install (Terminal)
               \`\`\`bash
