@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to create or update (e.g. v0.1.0)'
+        description: 'Release tag to create or update (e.g. v0.2.0)'
         required: false
-        default: 'v0.1.0'
+        default: 'v0.2.0'
       dxengine_ref:
         description: 'captain-courageous/DXEngine branch or tag to build (defaults to matching tag or macos-arm64-metal)'
         required: false
@@ -34,7 +34,7 @@ jobs:
           elif [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF_NAME}"
           else
-            TAG="v0.1.0"
+            TAG="v0.2.0"
           fi
           DXREF="${{ inputs.dxengine_ref }}"
           if [ -z "$DXREF" ]; then
@@ -95,19 +95,21 @@ jobs:
           REPO="${GITHUB_REPOSITORY}"
           cd DXEngine/dist/macDeusEx-release
           python3 - <<PY
-          import os, textwrap
+          import os, pathlib, textwrap
           tag = os.environ["RELEASE_TAG"]
           dxref = os.environ["DXREF"]
           dxsha = "$DXSHA"
           short_sha = "$SHORT_SHA"
-          with open("release_notes.md", "w") as f:
-              f.write(textwrap.dedent(f"""\
-              Native Apple Silicon (\`arm64\`) Metal + Cocoa build of **DXEngine** for Deus Ex (GOTY 1.112fm).
+          notes_path = pathlib.Path(os.environ["GITHUB_WORKSPACE"]) / "notes" / f"{tag}.md"
+          extra = ("\n" + notes_path.read_text().strip() + "\n") if notes_path.is_file() else ""
+          body = textwrap.dedent(f"""\
+              Native Apple Silicon (\`arm64\`) Metal + Cocoa build of **DXEngine** for Deus Ex (GOTY 1.112fm) & Deus Ex: Revision.
 
               - **Version:** \`{tag}\` (min macOS 14.0, Apple Silicon)
               - **Source:** [\`captain-courageous/DXEngine\` @ \`{dxref}\` (\`{short_sha}\`)](https://github.com/captain-courageous/DXEngine/commit/{dxsha})
               - **Matching Source Archive:** \`Deus-Ex-Mac-Source.tar.gz\` (zlib + LGPL v2 OpenAL Soft + BSD-3 third-party sources)
               - **Checksums:** Verified automatically by \`quick-install.sh\` against \`SHA256SUMS.txt\`
+              """) + extra + textwrap.dedent("""\
 
               ### Quick Install (Terminal)
               \`\`\`bash
@@ -116,7 +118,9 @@ jobs:
 
               ### Credits
               Built upon [JuggyMcNutty/port-ex-machina](https://github.com/JuggyMcNutty/port-ex-machina), [Alyx-ML/DeusEX-MacOS-Metal](https://github.com/Alyx-ML/DeusEX-MacOS-Metal), and [SurrealEngine](https://github.com/dpjudas/SurrealEngine). Requires your own legally owned copy of Deus Ex GOTY.
-              """))
+              """)
+          with open("release_notes.md", "w") as f:
+              f.write(body)
           PY
 
           if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then

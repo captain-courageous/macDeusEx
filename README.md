@@ -1,12 +1,12 @@
 # Deus Ex — Native Apple Silicon (Metal)
 
-A native `arm64` macOS build of **Deus Ex (GOTY 1.112fm)** powered by **DXEngine** with a native Apple **Metal** renderer, Cocoa AppKit integration, macOS Game Mode, and controller support.
+A native `arm64` macOS build of **Deus Ex (GOTY 1.112fm)** — with integrated **Deus Ex: Revision** support — powered by **DXEngine** with a native Apple **Metal** renderer, Cocoa AppKit integration, macOS Game Mode, and controller support.
 
 > **Requires your own legally owned copy of Deus Ex GOTY (1.112fm)** — Steam, GOG, retail disc, CrossOver/Whisky bottle, or standalone folder. No copyrighted game assets or icons are hosted or bundled in this repository.
 
 ---
 
-## Quick Install (Terminal)
+## Quick Install & Update (Terminal)
 
 1. Open **Terminal** (`Cmd + Space`, type `Terminal`, press `Enter`).
 2. Paste this command and press `Enter`:
@@ -15,21 +15,24 @@ A native `arm64` macOS build of **Deus Ex (GOTY 1.112fm)** powered by **DXEngine
 curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash
 ```
 
-The script automatically searches common **Steam** (including external Steam libraries), **GOG**, **Heroic**, **CrossOver**, **Whisky**, `~/Games`, `~/Downloads`, and existing `Deus Ex.app` installs.
+Re-running the same command later automatically detects your existing **`Deus Ex.app`** (`/Applications`, `~/Applications`, or `~/Downloads`), updates the engine in-place to the latest release, and preserves your saves, settings, icon, and installed Revision mod data.
 
-If your game folder is somewhere else, pass `--game <path>` (or the path directly):
+### Game & Revision Options
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash -s -- --game ~/path/to/"Deus Ex GOTY"
-```
-
-Add `--dmg` if you also want a drag-to-Applications disk image (`~/Downloads/Deus Ex.dmg`):
+- **Auto-detected sources:** Steam (including external Steam libraries), GOG, Heroic, CrossOver, Whisky, Porting Kit bottles, `~/Games`, `~/Downloads`, and existing `Deus Ex.app` installs.
+- **Deus Ex: Revision:** Detected automatically if already installed on your Mac/bottles, or pass `--with-revision` to automatically download & extract the official standalone installer from [`dx-revision.com`](https://www.dx-revision.com/download/) (or pass `-r <path>` with any Windows Revision folder, `.zip`, `.wim`, or GOG offline installer `setup_deus_ex_revision_*.exe`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash -s -- --dmg
+curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash -s -- --with-revision
 ```
 
-When finished, a single ad-hoc signed, self-contained **`Deus Ex.app`** (with your game files baked inside and the original game icon extracted directly from your local GOG, Steam, or `DeusEx.exe` files) is placed in `~/Downloads`. Drag it into **Applications** or double-click to play.
+- **Custom path / DMG:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash -s -- --game ~/path/to/"Deus Ex GOTY" --dmg
+```
+
+When finished, a single ad-hoc signed, self-contained **`Deus Ex.app`** (with your game files baked inside and the original game icon extracted directly from your local GOG, Steam, or `DeusEx.exe` files) is placed in `~/Downloads` (or updated in-place).
 
 ---
 

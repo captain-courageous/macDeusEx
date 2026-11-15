@@ -1,26 +1,23 @@
 #!/bin/bash
-# Deus Ex (macOS Apple Silicon / Metal) quick packager & installer.
+# Deus Ex (macOS Apple Silicon / Metal) quick packager, updater & installer.
 #
 # Downloads the prebuilt native ARM64 engine-only Deus Ex.app, locates your
 # legal Deus Ex GOTY (1.112fm) installation (Steam, GOG, standalone folder,
-# CrossOver/Whisky bottle, or existing .app), extracts the original game icon
-# from your local files, bakes the assets cleanly into
-# Deus Ex.app/Contents/Resources/GameData, ad-hoc signs the bundle, and places
-# a ready-to-play "Deus Ex.app" in ~/Downloads.
+# CrossOver/Whisky bottle, or existing .app), optionally adds Deus Ex: Revision
+# (from Steam, GOG, CrossOver/Whisky, Windows installer/zip, or automatic
+# download from dx-revision.com), extracts the original game icon, bakes the
+# assets into Deus Ex.app/Contents/Resources/GameData, ad-hoc signs the bundle,
+# and either updates your existing Deus Ex.app in-place or installs a new copy
+# in ~/Downloads.
 #
 # No original copyrighted game data or icons are hosted or bundled in the
-# release archive — all game assets come strictly from your own local copy.
+# release archive — all game assets come strictly from your own local copy or
+# official mod distribution mirrors.
 #
 # Usage:
-#   quick-install.sh [--dmg] [-g|--game <path>] [--local <tarball_or_app>] [game_files_dir]
-#
-#   -g, --game <path>        path to your Deus Ex GOTY folder (Steam, GOG, disc,
-#                            standalone, System subfolder, or existing .app)
-#   --dmg                    also wrap Deus Ex.app into a drag-to-Applications
-#                            "Deus Ex.dmg" in ~/Downloads
-#   --local <path>           use a local DeusEx-macos-arm64.tar.gz or
-#                            engine-only Deus Ex.app instead of downloading
-#   game_files_dir           same as --game (positional shortcut)
+#   quick-install.sh [--dmg] [-g|--game <path>] [-r|--revision <path|auto>]
+#                    [--with-revision] [--update-revision] [--vanilla]
+#                    [--local <tarball_or_app>] [game_files_dir]
 set -euo pipefail
 
 REPO="${DEUS_EX_MAC_REPO:-captain-courageous/macDeusEx}"
@@ -39,6 +36,7 @@ VOLNAME="$APP_NAME"
 BUNDLE_ID="local.deusex.native"
 DL="$HOME/Downloads"
 SUPPORT_DIR="$HOME/Library/Application Support/Deus Ex Native"
+TOOLS_DIR="$SUPPORT_DIR/tools"
 
 # ---------------------------------------------------------------------------
 # Terminal UI (degrades gracefully to plain "==>" lines when non-interactive).
@@ -85,12 +83,29 @@ step() {
 	printf '\n%s◆%s %s[%d/%d]%s %s\n' "$AMBER" "$RESET" "$BOLD" "$STEP" "$STEPS_TOTAL" "$RESET" "$1"
 }
 ok() { printf '  %s✔%s %s\n' "$GREEN" "$RESET" "$1"; }
+warn() { printf '  %s!%s %s\n' "$AMBER" "$RESET" "$1"; }
 die() {
 	printf '  %s✘ error:%s %s\n' "$RED" "$RESET" "$1" >&2
 	shift
 	local line
 	for line in "$@"; do printf '    %s\n' "$line" >&2; done
 	exit 1
+}
+
+can_prompt() {
+	[ "${DEUS_EX_NO_PROMPT:-0}" != "1" ] || return 1
+	[ "$FANCY" = yes ] && [ -e /dev/tty ] && ( : </dev/tty ) 2>/dev/null
+}
+
+ask_tty() {
+	local prompt=$1 default=${2:-} reply=""
+	if can_prompt; then
+		printf '  %s%s%s ' "$BOLD" "$prompt" "$RESET" >/dev/tty
+		if ! IFS= read -r reply </dev/tty; then
+			reply=""
+		fi
+	fi
+	printf '%s\n' "${reply:-$default}"
 }
 
 hsize() {
@@ -179,22 +194,33 @@ run_task() {
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--dmg] [-g|--game <path>] [--local <tarball_or_app>] [game_files_dir]
+Usage: $(basename "$0") [options] [game_files_dir]
 
 Options:
-  -g, --game <path> Path to your Deus Ex GOTY folder (Steam, GOG, disc, or .app)
-  --dmg             Also wrap Deus Ex.app into ~/Downloads/Deus Ex.dmg
-  --local <path>    Use a local DeusEx-macos-arm64.tar.gz or engine .app
-  -h, --help        Show this help message
+  -g, --game <path>      Path to your Deus Ex GOTY folder (Steam, GOG, disc, or .app)
+  -r, --revision <path>  Path to Deus Ex: Revision folder or Windows installer (.zip/.exe/.wim),
+                         or 'auto' to detect locally / download from dx-revision.com
+      --with-revision    Include Deus Ex: Revision (same as --revision auto)
+      --update-revision  Force re-downloading/updating Revision mod files
+      --vanilla          Install/update Vanilla GOTY only (exclude Revision)
+      --no-revision      Alias for --vanilla
+      --dmg              Also wrap Deus Ex.app into ~/Downloads/Deus Ex.dmg
+      --local <path>     Use a local DeusEx-macos-arm64.tar.gz or engine .app
+  -h, --help             Show this help message
+
+When run again on a system with an existing Deus Ex.app (/Applications, ~/Applications,
+or ~/Downloads), the existing bundle is updated in-place while keeping your saves, configs,
+and installed mod data.
 
 Environment overrides:
   DEUS_EX_MAC_REPO     GitHub owner/repo hosting release assets (default: $REPO)
   DEUS_EX_RELEASE_URL  Direct URL to DeusEx-macos-arm64.tar.gz
+  DEUS_EX_REVISION_URL Direct URL to official Revision_*_SteamInstaller.zip
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Case-insensitive lookup & Deus Ex GOTY validation (mirrors game_install.h).
+# Case-insensitive lookup & Deus Ex GOTY / Revision validation.
 # ---------------------------------------------------------------------------
 find_ci_dir() {
 	local parent=$1 target_lower=$2 entry base lower
@@ -262,11 +288,25 @@ validate_game_dir() {
 	return 0
 }
 
+validate_revision_dir() {
+	local root=$1 sys maps tex mus
+	sys="$(find_ci_dir "$root" "system")" || return 1
+	maps="$(find_ci_dir "$root" "maps")" || return 1
+	tex="$(find_ci_dir "$root" "textures")" || return 1
+	mus="$(find_ci_dir "$root" "music")" || return 1
+
+	find_ci_file "$sys" "revision.u" >/dev/null || return 1
+	(find_ci_file "$sys" "revision.ini" >/dev/null || find_ci_file "$sys" "revisiondefault.ini" >/dev/null) || return 1
+	has_ci_ext "$maps" "dx" || return 1
+	has_ci_ext "$tex" "utx" || return 1
+	has_ci_ext "$mus" "ogg" || has_ci_ext "$mus" "umx" || return 1
+	return 0
+}
+
 resolve_game_dir() {
 	local base="${1%/}" root dir cand
 	for root in "$base" "$base.app"; do
 		[ -d "$root" ] || continue
-		# If caller passed the System folder itself, step up to its parent.
 		if [ "$(basename "$root" | tr '[:upper:]' '[:lower:]')" = "system" ]; then
 			cand="$(dirname "$root")"
 			if validate_game_dir "$cand"; then
@@ -305,10 +345,109 @@ resolve_game_dir() {
 	return 1
 }
 
+resolve_revision_dir() {
+	local base="${1%/}" root dir cand sub
+	for root in "$base" "$base.app"; do
+		[ -d "$root" ] || continue
+		if [ "$(basename "$root" | tr '[:upper:]' '[:lower:]')" = "system" ]; then
+			cand="$(dirname "$root")"
+			if validate_revision_dir "$cand"; then
+				printf '%s\n' "$cand"
+				return 0
+			fi
+		fi
+		for dir in \
+			"$root" \
+			"$root/Revision" \
+			"$root/Contents/Resources/GameData/Revision" \
+			"$root/Put game files here/Revision" \
+			"$root/Deus Ex Revision" \
+			"$root/Deus Ex Revision/Revision" \
+			"$root/Deus Ex/Revision" \
+			"$root/Deus Ex GOTY/Revision" \
+			"$root/drive_c/GOG Games/Deus Ex Revision" \
+			"$root/drive_c/GOG Games/Deus Ex Revision/Revision" \
+			"$root/drive_c/GOG Games/Deus Ex GOTY/Revision" \
+			"$root/drive_c/GOG Games/Deus Ex/Revision" \
+			"$root/drive_c/Program Files/Steam/steamapps/common/Deus Ex Revision" \
+			"$root/drive_c/Program Files/Steam/steamapps/common/Deus Ex Revision/Revision" \
+			"$root/drive_c/Program Files (x86)/Steam/steamapps/common/Deus Ex Revision" \
+			"$root/drive_c/Program Files (x86)/Steam/steamapps/common/Deus Ex Revision/Revision" \
+			"$root/drive_c/Program Files/Steam/steamapps/common/Deus Ex/Revision" \
+			"$root/drive_c/Program Files (x86)/Steam/steamapps/common/Deus Ex/Revision" \
+			"$root/Contents/Resources/drive_c/GOG Games/Deus Ex Revision/Revision" \
+			"$root/Contents/Resources/drive_c/GOG Games/Deus Ex GOTY/Revision" \
+			"$root/Contents/SharedSupport/prefix/drive_c/GOG Games/Deus Ex Revision/Revision" \
+			"$root/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/Steam/steamapps/common/Deus Ex Revision/Revision"
+		do
+			if validate_revision_dir "$dir"; then
+				printf '%s\n' "$dir"
+				return 0
+			fi
+			sub="$(find_ci_dir "$dir" "revision" 2>/dev/null || true)"
+			if [ -n "$sub" ] && validate_revision_dir "$sub"; then
+				printf '%s\n' "$sub"
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+# Collect all candidate Steam/Bottle/GOG paths into global CAND_DIRS array.
+collect_install_candidates() {
+	CAND_DIRS=(
+		"$DL/Deus Ex Mac/Put game files here"
+		"$HOME/Library/Application Support/Steam/steamapps/common/Deus Ex"
+		"$HOME/Library/Application Support/Steam/steamapps/common/Deus Ex GOTY"
+		"$HOME/Library/Application Support/Steam/steamapps/common/Deus Ex Revision"
+		"$HOME/Games/Heroic/Deus Ex GOTY"
+		"$HOME/Games/Heroic/Deus Ex"
+		"$HOME/Games/Heroic/Deus Ex Revision"
+		"$HOME/Games/Deus Ex GOTY"
+		"$HOME/Games/Deus Ex"
+		"$HOME/Games/Deus Ex Revision"
+		"$DL/Deus Ex GOTY"
+		"$DL/Deus Ex"
+		"$DL/Deus Ex Revision"
+		"$HOME/Desktop/Deus Ex GOTY"
+		"$HOME/Desktop/Deus Ex"
+		"$HOME/Desktop/Deus Ex Revision"
+	)
+	local vdf="$HOME/Library/Application Support/Steam/steamapps/libraryfolders.vdf"
+	if [ -f "$vdf" ]; then
+		local lib
+		while IFS= read -r lib; do
+			[ -d "$lib" ] || continue
+			CAND_DIRS+=(
+				"$lib/steamapps/common/Deus Ex"
+				"$lib/steamapps/common/Deus Ex GOTY"
+				"$lib/steamapps/common/Deus Ex Revision"
+			)
+		done <<EOF
+$(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\([^"]*\)".*/\1/p' "$vdf")
+EOF
+	fi
+	local bottle
+	for bottle in \
+		"$HOME/Library/Application Support/CrossOver/Bottles"/* \
+		"$HOME/Library/Containers/com.isaacmarovitz.Whisky/Bottles"/* \
+		"$HOME/Applications/Porting Kit"/*
+	do
+		if [ -d "$bottle" ]; then
+			CAND_DIRS+=("$bottle")
+		fi
+	done
+	return 0
+}
+
 # Parse arguments.
 WANT_DMG=no
 LOCAL_SRC=""
 GAME_ARG=""
+REV_MODE=""      # "", "yes", "no", or "auto"
+REV_ARG=""       # explicit --revision path/archive if given
+UPDATE_REV=no
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--dmg) WANT_DMG=yes; shift ;;
@@ -317,6 +456,30 @@ while [ $# -gt 0 ]; do
 			GAME_ARG="$2"; shift 2 ;;
 		--game=*)
 			GAME_ARG="${1#--game=}"; shift ;;
+		-r|--revision)
+			[ $# -ge 2 ] || die "$1 requires a folder/archive path or 'auto'"
+			if [ "$2" = "auto" ]; then
+				REV_MODE="auto"
+			else
+				REV_MODE="yes"
+				REV_ARG="$2"
+			fi
+			shift 2 ;;
+		--revision=*)
+			val="${1#--revision=}"
+			if [ "$val" = "auto" ]; then
+				REV_MODE="auto"
+			else
+				REV_MODE="yes"
+				REV_ARG="$val"
+			fi
+			shift ;;
+		--with-revision)
+			REV_MODE="auto"; shift ;;
+		--update-revision)
+			REV_MODE="auto"; UPDATE_REV=yes; shift ;;
+		--vanilla|--no-revision)
+			REV_MODE="no"; REV_ARG=""; shift ;;
 		--local)
 			[ $# -ge 2 ] || die "--local requires a path to DeusEx-macos-arm64.tar.gz or Deus Ex.app"
 			LOCAL_SRC="$2"; shift 2 ;;
@@ -352,74 +515,56 @@ if [ -z "$LOCAL_SRC" ] && [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/DeusEx-macos
 fi
 
 # ---------------------------------------------------------------------------
-# Step 1: Locate original Deus Ex GOTY game files.
+# Step 1: Locate original Deus Ex GOTY game files & optional Revision mod.
 # ---------------------------------------------------------------------------
 step "Locating your Deus Ex GOTY game files"
 
+EXISTING_APP=""
+EXISTING_ICNS=""
+EXISTING_VER=""
 ASSET_SRC=""
+collect_install_candidates
+
+# Check existing self-contained Deus Ex.app installs first (supports seamless in-place updates).
+APP_SEARCH_LIST=(
+	"/Applications/$APP_NAME.app"
+	"$HOME/Applications/$APP_NAME.app"
+	"$DL/$APP_NAME.app"
+	"$DL/Deus Ex Mac/$APP_NAME.app"
+)
+if [ -n "${DEUS_EX_DEST_DIR:-}" ]; then
+	APP_SEARCH_LIST=("${DEUS_EX_DEST_DIR%/}/$APP_NAME.app")
+fi
+for app in "${APP_SEARCH_LIST[@]}"; do
+	if validate_game_dir "$app/Contents/Resources/GameData"; then
+		EXISTING_APP="$app"
+		if [ -f "$app/Contents/Resources/DeusEx.icns" ]; then
+			EXISTING_ICNS="$app/Contents/Resources/DeusEx.icns"
+		fi
+		EXISTING_VER="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist" 2>/dev/null || true)"
+		if [ -z "$GAME_ARG" ]; then
+			ASSET_SRC="$app/Contents/Resources/GameData"
+			ok "Found existing installation: $app${EXISTING_VER:+ (v$EXISTING_VER)}"
+		fi
+		break
+	fi
+done
+
 if [ -n "$GAME_ARG" ]; then
 	if ! ASSET_SRC="$(resolve_game_dir "$GAME_ARG")"; then
 		die "complete Deus Ex GOTY files not found in: $GAME_ARG" \
 			"Pass the Deus Ex GOTY folder containing System/, Maps/, Textures/, Sounds/, and Music/."
 	fi
 	ok "Using game files from $ASSET_SRC"
-else
-	# 1. Existing self-contained Deus Ex.app installs (for seamless upgrades).
-	for app in \
-		"/Applications/$APP_NAME.app" \
-		"$HOME/Applications/$APP_NAME.app" \
-		"$DL/$APP_NAME.app" \
-		"$DL/Deus Ex Mac/$APP_NAME.app"
-	do
-		if validate_game_dir "$app/Contents/Resources/GameData"; then
-			ASSET_SRC="$app/Contents/Resources/GameData"
-			ok "Using game files from existing $app"
+elif [ -z "$ASSET_SRC" ]; then
+	for cand in "${CAND_DIRS[@]}"; do
+		if ASSET_SRC="$(resolve_game_dir "$cand")"; then
+			ok "Using game files from $ASSET_SRC"
 			break
 		fi
+		ASSET_SRC=""
 	done
 
-	# 2. Common Steam (including custom Steam libraries), GOG, Heroic, CrossOver, Whisky & standalone folders.
-	if [ -z "$ASSET_SRC" ]; then
-		STEAM_CANDS=(
-			"$DL/Deus Ex Mac/Put game files here"
-			"$HOME/Library/Application Support/Steam/steamapps/common/Deus Ex"
-			"$HOME/Library/Application Support/Steam/steamapps/common/Deus Ex GOTY"
-			"$HOME/Games/Heroic/Deus Ex GOTY"
-			"$HOME/Games/Heroic/Deus Ex"
-			"$HOME/Games/Deus Ex GOTY"
-			"$HOME/Games/Deus Ex"
-			"$DL/Deus Ex GOTY"
-			"$DL/Deus Ex"
-			"$HOME/Desktop/Deus Ex GOTY"
-			"$HOME/Desktop/Deus Ex"
-		)
-		VDF="$HOME/Library/Application Support/Steam/steamapps/libraryfolders.vdf"
-		if [ -f "$VDF" ]; then
-			while IFS= read -r lib; do
-				[ -d "$lib" ] || continue
-				STEAM_CANDS+=("$lib/steamapps/common/Deus Ex" "$lib/steamapps/common/Deus Ex GOTY")
-			done <<EOF
-$(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\([^"]*\)".*/\1/p' "$VDF")
-EOF
-		fi
-		for bottle in \
-			"$HOME/Library/Application Support/CrossOver/Bottles"/* \
-			"$HOME/Library/Containers/com.isaacmarovitz.Whisky/Bottles"/* \
-			"$HOME/Applications/Porting Kit"/*
-		do
-			[ -d "$bottle" ] && STEAM_CANDS+=("$bottle")
-		done
-
-		for cand in "${STEAM_CANDS[@]}"; do
-			if ASSET_SRC="$(resolve_game_dir "$cand")"; then
-				ok "Using game files from $ASSET_SRC"
-				break
-			fi
-			ASSET_SRC=""
-		done
-	fi
-
-	# 3. Fallback: scan ~/Downloads/* and ~/Desktop/* entries mentioning Deus Ex.
 	if [ -z "$ASSET_SRC" ]; then
 		for search_root in "$DL" "$HOME/Desktop" "$HOME/Games"; do
 			[ -d "$search_root" ] || continue
@@ -443,6 +588,111 @@ EOF
 			"Install Deus Ex via Steam/GOG or place the folder (System, Maps, Textures, Sounds, Music) in ~/Downloads," \
 			"or pass its path explicitly with --game:" \
 			"  curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/quick-install.sh | bash -s -- --game ~/path/to/\"Deus Ex GOTY\""
+	fi
+fi
+
+# Locate any local Revision folder or Windows Revision installer archive.
+REV_SRC=""
+REV_ARCHIVE=""
+REV_DOWNLOAD=no
+
+find_local_revision() {
+	local cand=""
+	if [ -n "$REV_ARG" ]; then
+		if [ -d "$REV_ARG" ]; then
+			REV_SRC="$(resolve_revision_dir "$REV_ARG" || true)"
+			[ -n "$REV_SRC" ] || die "Deus Ex: Revision files not found in folder: $REV_ARG"
+			return 0
+		elif [ -f "$REV_ARG" ]; then
+			REV_ARCHIVE="$REV_ARG"
+			return 0
+		else
+			die "Revision path not found: $REV_ARG"
+		fi
+	fi
+
+	# 1. Existing Revision alongside ASSET_SRC or inside EXISTING_APP (unless forcing refresh).
+	if [ "$UPDATE_REV" != yes ]; then
+		REV_SRC="$(resolve_revision_dir "$ASSET_SRC" || true)"
+		[ -n "$REV_SRC" ] && return 0
+	fi
+
+	# 2. Common Steam / GOG / CrossOver / Whisky / Downloads folders.
+	for cand in "${CAND_DIRS[@]}"; do
+		REV_SRC="$(resolve_revision_dir "$cand" || true)"
+		[ -n "$REV_SRC" ] && return 0
+	done
+	for search_root in "$DL" "$HOME/Desktop" "$HOME/Games"; do
+		[ -d "$search_root" ] || continue
+		for cand in "$search_root"/*; do
+			case "$(basename "$cand" | tr '[:upper:]' '[:lower:]')" in
+				*revision*|*deus*) ;;
+				*) continue ;;
+			esac
+			if [ -d "$cand" ]; then
+				REV_SRC="$(resolve_revision_dir "$cand" || true)"
+				[ -n "$REV_SRC" ] && return 0
+			elif [ -f "$cand" ]; then
+				case "$(basename "$cand" | tr '[:upper:]' '[:lower:]')" in
+					revision*steaminstaller*.zip|setup_deus_ex_revision*.exe)
+						REV_ARCHIVE="$cand"
+						return 0 ;;
+				esac
+			fi
+		done
+	done
+	return 1
+}
+
+if [ "$REV_MODE" != "no" ]; then
+	find_local_revision || true
+fi
+
+if [ "$REV_MODE" = "no" ]; then
+	REV_SRC=""
+	REV_ARCHIVE=""
+	ok "Mode: Vanilla Deus Ex GOTY"
+elif [ -n "$REV_MODE" ]; then
+	if [ -n "$REV_SRC" ]; then
+		ok "Using Deus Ex: Revision files from $REV_SRC"
+	elif [ -n "$REV_ARCHIVE" ]; then
+		ok "Using Deus Ex: Revision installer: $(basename "$REV_ARCHIVE")"
+	else
+		REV_DOWNLOAD=yes
+		ok "Will download and install official Deus Ex: Revision mod"
+	fi
+else
+	# No explicit Revision flag: preserve existing Revision on upgrade, otherwise offer interactively.
+	if [ -n "$EXISTING_APP" ] && validate_revision_dir "$EXISTING_APP/Contents/Resources/GameData/Revision"; then
+		REV_SRC="$EXISTING_APP/Contents/Resources/GameData/Revision"
+		ok "Preserving installed Deus Ex: Revision mod during update"
+	elif [ -n "$REV_SRC" ]; then
+		if can_prompt; then
+			ans="$(ask_tty "Found Deus Ex: Revision at $REV_SRC. Include it? [Y/n]" "y")"
+			case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in
+				n|no) REV_SRC="" ;;
+				*) ok "Including Deus Ex: Revision" ;;
+			esac
+		else
+			REV_SRC=""
+		fi
+	elif [ -n "$REV_ARCHIVE" ]; then
+		if can_prompt; then
+			ans="$(ask_tty "Found Revision installer $(basename "$REV_ARCHIVE"). Install it? [Y/n]" "y")"
+			case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in
+				n|no) REV_ARCHIVE="" ;;
+				*) ok "Including Deus Ex: Revision from $(basename "$REV_ARCHIVE")" ;;
+			esac
+		else
+			REV_ARCHIVE=""
+		fi
+	elif can_prompt; then
+		ans="$(ask_tty "Also install Deus Ex: Revision mod (downloads ~3.1 GB official installer)? [y/N]" "n")"
+		case "$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]')" in
+			y|yes)
+				REV_DOWNLOAD=yes
+				ok "Will download and install Deus Ex: Revision" ;;
+		esac
 	fi
 fi
 
@@ -504,6 +754,7 @@ if [ ! -d "$APP" ]; then
 fi
 
 [ -x "$APP/Contents/MacOS/DXEngine" ] || die "DXEngine binary missing inside $APP"
+NEW_VER="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" 2>/dev/null || true)"
 
 /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$APP/Contents/Info.plist" 2>/dev/null \
 	|| /usr/libexec/PlistBuddy -c "Add :CFBundleName string $APP_NAME" "$APP/Contents/Info.plist"
@@ -513,7 +764,7 @@ fi
 	|| /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string DeusEx" "$APP/Contents/Info.plist"
 
 # ---------------------------------------------------------------------------
-# Step 3: Bake Deus Ex GOTY assets into Contents/Resources/GameData.
+# Step 3: Bake Deus Ex GOTY (+ optional Revision) into Contents/Resources/GameData.
 # ---------------------------------------------------------------------------
 step "Packaging game assets into Deus Ex.app"
 
@@ -525,13 +776,26 @@ SRC_SND="$(find_ci_dir "$ASSET_SRC" "sounds")"
 SRC_MUS="$(find_ci_dir "$ASSET_SRC" "music")"
 SRC_HELP="$(find_ci_dir "$ASSET_SRC" "help" || true)"
 
+copy_deref() {
+	local src=$1 dst=$2
+	if ! cp -c -R -L "$src" "$dst" 2>/dev/null; then
+		rm -rf "$dst" 2>/dev/null || true
+		cp -R -L "$src" "$dst"
+	fi
+}
+
+merge_deref() {
+	local src=$1 dst=$2
+	cp -c -R -L "$src"/. "$dst"/ 2>/dev/null || cp -R -L "$src"/. "$dst"/
+}
+
 bake_files() {
-	cp -R -L "$SRC_SYS" "$GDATA/System"
-	cp -R -L "$SRC_MAPS" "$GDATA/Maps"
-	cp -R -L "$SRC_TEX" "$GDATA/Textures"
-	cp -R -L "$SRC_SND" "$GDATA/Sounds"
-	cp -R -L "$SRC_MUS" "$GDATA/Music"
-	[ -n "$SRC_HELP" ] && cp -R -L "$SRC_HELP" "$GDATA/Help" || true
+	copy_deref "$SRC_SYS" "$GDATA/System"
+	copy_deref "$SRC_MAPS" "$GDATA/Maps"
+	copy_deref "$SRC_TEX" "$GDATA/Textures"
+	copy_deref "$SRC_SND" "$GDATA/Sounds"
+	copy_deref "$SRC_MUS" "$GDATA/Music"
+	[ -n "$SRC_HELP" ] && copy_deref "$SRC_HELP" "$GDATA/Help" || true
 }
 
 if [ "$FANCY" = yes ]; then
@@ -542,11 +806,190 @@ if [ "$FANCY" = yes ]; then
 		$(du_bytes "$SRC_SND") + \
 		$(du_bytes "$SRC_MUS") ))
 	bake_files &
-	watch_bytes $! "Copying game data" "$BAKE_TOTAL" du_bytes "$GDATA" \
-		|| die "copying the game files failed"
+	watch_bytes $! "Copying GOTY data" "$BAKE_TOTAL" du_bytes "$GDATA" \
+		|| die "copying GOTY game files failed"
 else
-	echo "==> Copying Deus Ex game data into bundle..."
+	echo "==> Copying Deus Ex GOTY game data into bundle..."
 	bake_files
+fi
+
+# Helper: obtain 7zz (official macOS universal binary) for extracting Windows .wim/.7z/.zip Revision archives.
+ensure_7zz() {
+	if command -v 7zz >/dev/null 2>&1; then
+		command -v 7zz; return 0
+	fi
+	if command -v 7z >/dev/null 2>&1; then
+		command -v 7z; return 0
+	fi
+	if [ -x "$TOOLS_DIR/7zz" ]; then
+		printf '%s\n' "$TOOLS_DIR/7zz"; return 0
+	fi
+	mkdir -p "$TOOLS_DIR"
+	local rel="a/7z2301-mac.tar.xz"
+	local detected
+	detected="$(curl -fsSL https://www.7-zip.org/download.html 2>/dev/null | grep -oiE 'a/7z[0-9]+-mac\.tar\.xz' | head -n 1 || true)"
+	[ -n "$detected" ] && rel="$detected"
+	local url="https://www.7-zip.org/$rel"
+	curl -fsSL -o "$TMP/7z-mac.tar.xz" "$url" || die "failed to download 7zz extractor from $url"
+	mkdir -p "$TMP/7z_unpack"
+	tar -xJf "$TMP/7z-mac.tar.xz" -C "$TMP/7z_unpack" || die "failed to unpack $url"
+	local bin
+	bin="$(find "$TMP/7z_unpack" -maxdepth 2 -name '7zz' -type f -print -quit)"
+	[ -n "$bin" ] || die "7zz binary missing in $url"
+	cp "$bin" "$TOOLS_DIR/7zz"
+	xattr -cr "$TOOLS_DIR/7zz" 2>/dev/null || true
+	chmod +x "$TOOLS_DIR/7zz"
+	printf '%s\n' "$TOOLS_DIR/7zz"
+}
+
+resolve_revision_url() {
+	if [ -n "${DEUS_EX_REVISION_URL:-}" ]; then
+		printf '%s\n' "$DEUS_EX_REVISION_URL"
+		return 0
+	fi
+	local live
+	live="$(curl -fsSL https://www.dx-revision.com/download/ 2>/dev/null \
+		| grep -oiE 'https://[^"'\'' ]*Revision_[^"'\'' ]*_SteamInstaller\.zip' | head -n 1 || true)"
+	if [ -n "$live" ]; then
+		printf '%s\n' "$live"
+	else
+		printf '%s\n' "https://cloudfront.dx-revision.com/releases/Revision_1_6_3_0_SteamInstaller.zip"
+	fi
+}
+
+install_revision_archive() {
+	local arc=$1 remove_arc=${2:-no}
+	local lower
+	lower="$(printf '%s' "$(basename "$arc")" | tr '[:upper:]' '[:lower:]')"
+	local rev_out="$GDATA/Revision"
+	mkdir -p "$rev_out"
+
+	case "$lower" in
+		setup_deus_ex_revision*.exe)
+			local INNO=""
+			if command -v innoextract >/dev/null 2>&1; then
+				INNO="$(command -v innoextract)"
+			elif command -v brew >/dev/null 2>&1; then
+				run_task "Installing innoextract via Homebrew" brew install innoextract
+				INNO="$(command -v innoextract || true)"
+			fi
+			[ -n "$INNO" ] || die "innoextract is required to unpack GOG installer $(basename "$arc")" \
+				"Install Homebrew + 'brew install innoextract', or re-run with '--with-revision' to download the official zip installer instead."
+			mkdir -p "$TMP/rev_inno"
+			run_task "Extracting GOG Revision installer" "$INNO" -e -s -d "$TMP/rev_inno" "$arc"
+			local extracted
+			extracted="$(resolve_revision_dir "$TMP/rev_inno" || true)"
+			[ -n "$extracted" ] || die "could not find Revision files inside $(basename "$arc")"
+			cp -R -L "$extracted"/. "$rev_out/"
+			rm -rf "$TMP/rev_inno"
+			return 0 ;;
+	esac
+
+	local SEVENZ
+	SEVENZ="$(ensure_7zz)"
+	case "$lower" in
+		*.wim)
+			run_task "Extracting $(basename "$arc")" "$SEVENZ" x -y -aoa -o"$rev_out" "$arc" >/dev/null
+			;;
+		*.zip|*.7z|*.exe)
+			mkdir -p "$TMP/rev_wims"
+			run_task "Unpacking $(basename "$arc")" "$SEVENZ" e -y -aoa -o"$TMP/rev_wims" "$arc" "*.wim" >/dev/null || true
+			[ "$remove_arc" = yes ] && rm -f "$arc"
+			local wim_found=0 wim
+			for wim_name in Content_Stock.wim Content_Patch.wim Content_Steam.wim; do
+				wim="$(find_ci_file "$TMP/rev_wims" "$(printf '%s' "$wim_name" | tr '[:upper:]' '[:lower:]')" || true)"
+				if [ -n "$wim" ]; then
+					wim_found=1
+					run_task "Extracting $wim_name into Revision" "$SEVENZ" x -y -aoa -o"$rev_out" "$wim" >/dev/null
+					rm -f "$wim"
+				fi
+			done
+			for wim in "$TMP/rev_wims"/*.wim "$TMP/rev_wims"/*.WIM; do
+				[ -f "$wim" ] || continue
+				wim_found=1
+				run_task "Extracting $(basename "$wim") into Revision" "$SEVENZ" x -y -aoa -o"$rev_out" "$wim" >/dev/null
+				rm -f "$wim"
+			done
+			if [ "$wim_found" -eq 0 ]; then
+				# Plain archive (e.g. zipped Revision folder) without inner .wim containers.
+				mkdir -p "$TMP/rev_plain"
+				run_task "Extracting $(basename "$arc")" "$SEVENZ" x -y -aoa -o"$TMP/rev_plain" "$arc" >/dev/null
+				local found_dir
+				found_dir="$(resolve_revision_dir "$TMP/rev_plain" || true)"
+				[ -n "$found_dir" ] || die "no Revision mod files found inside $(basename "$arc")"
+				merge_deref "$found_dir" "$rev_out"
+				rm -rf "$TMP/rev_plain"
+			fi
+			rm -rf "$TMP/rev_wims"
+			;;
+		*)
+			die "unsupported Revision archive format: $arc" ;;
+	esac
+}
+
+if [ "$REV_DOWNLOAD" = yes ]; then
+	REV_URL="$(resolve_revision_url)"
+	REV_DL_NAME="$(basename "${REV_URL%%\?*}")"
+	[ -n "$REV_DL_NAME" ] || REV_DL_NAME="Revision_SteamInstaller.zip"
+	REV_DL_PATH="$TMP/$REV_DL_NAME"
+	if [ "$FANCY" = yes ]; then
+		REV_TOTAL="$(curl -sIL "$REV_URL" 2>/dev/null \
+			| awk 'tolower($1)=="content-length:" {gsub(/\r/,"",$2); cl=$2} END {printf "%d", cl}' || echo 0)"
+		case "$REV_TOTAL" in ''|*[!0-9]*) REV_TOTAL=0 ;; esac
+		curl -fsSL -o "$REV_DL_PATH" "$REV_URL" &
+		watch_bytes $! "$REV_DL_NAME" "$REV_TOTAL" file_bytes "$REV_DL_PATH" \
+			|| die "Revision download failed from $REV_URL"
+	else
+		echo "==> Downloading $REV_DL_NAME..."
+		curl -fL --progress-bar -o "$REV_DL_PATH" "$REV_URL" \
+			|| die "Revision download failed from $REV_URL"
+	fi
+	REV_ARCHIVE="$REV_DL_PATH"
+fi
+
+if [ -n "$REV_SRC" ]; then
+	mkdir -p "$GDATA/Revision"
+	bake_revision_dir() {
+		local item base lower
+		for item in "$REV_SRC"/*; do
+			[ -e "$item" ] || continue
+			base="$(basename "$item")"
+			lower="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+			case "$lower" in
+				save|cache) continue ;;
+			esac
+			copy_deref "$item" "$GDATA/Revision/$base"
+		done
+	}
+	if [ "$FANCY" = yes ]; then
+		REV_BYTES="$(du_bytes "$REV_SRC")"
+		bake_revision_dir &
+		watch_bytes $! "Copying Revision mod" "$REV_BYTES" du_bytes "$GDATA/Revision" \
+			|| die "copying Revision mod files failed"
+	else
+		echo "==> Copying Deus Ex: Revision mod into bundle..."
+		bake_revision_dir
+	fi
+fi
+
+if [ -n "$REV_ARCHIVE" ]; then
+	DL_REMOVE=no
+	[ "$REV_DOWNLOAD" = yes ] && DL_REMOVE=yes
+	install_revision_archive "$REV_ARCHIVE" "$DL_REMOVE"
+fi
+
+if [ -d "$GDATA/Revision" ]; then
+	validate_revision_dir "$GDATA/Revision" || die "Revision files in $GDATA/Revision appear incomplete"
+	REV_SYS_DIR="$(find_ci_dir "$GDATA/Revision" "system")"
+	if ! find_ci_file "$REV_SYS_DIR" "revision.ini" >/dev/null; then
+		REV_DEF_INI="$(find_ci_file "$REV_SYS_DIR" "revisiondefault.ini" || true)"
+		[ -n "$REV_DEF_INI" ] && cp "$REV_DEF_INI" "$REV_SYS_DIR/Revision.ini"
+	fi
+	if ! find_ci_file "$REV_SYS_DIR" "revisionuser.ini" >/dev/null; then
+		REV_DEF_USR="$(find_ci_file "$REV_SYS_DIR" "revisiondefuser.ini" || true)"
+		[ -n "$REV_DEF_USR" ] && cp "$REV_DEF_USR" "$REV_SYS_DIR/RevisionUser.ini"
+	fi
+	ok "Baked Deus Ex: Revision mod into GameData/Revision"
 fi
 
 extract_pe_icon() {
@@ -613,7 +1056,11 @@ PY
 }
 
 install_original_icon() {
-	command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1 || return 0
+	local out="$APP/Contents/Resources/DeusEx.icns"
+	command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1 || {
+		[ -n "$EXISTING_ICNS" ] && [ -f "$EXISTING_ICNS" ] && cp "$EXISTING_ICNS" "$out" && ok "Preserved app icon"
+		return 0
+	}
 	local ico="" src_label="" exe=""
 	ico="$(find -H "$ASSET_SRC" -maxdepth 2 -iname 'goggame-*.ico' -print -quit 2>/dev/null || true)"
 	[ -n "$ico" ] || [ -z "$SRC_HELP" ] || ico="$(find -H "$SRC_HELP" -maxdepth 1 -iname 'DeusEx.ico' -print -quit 2>/dev/null || true)"
@@ -621,6 +1068,10 @@ install_original_icon() {
 	[ -n "$ico" ] || ico="$(find -H "$ASSET_SRC" -maxdepth 1 -iname '*.ico' ! -iname 'gog.ico' ! -iname 'support.ico' ! -iname 'unins*.ico' -print -quit 2>/dev/null || true)"
 	if [ -f "$ico" ]; then
 		src_label="$(basename "$ico")"
+	elif [ -n "$EXISTING_ICNS" ] && [ -f "$EXISTING_ICNS" ]; then
+		cp "$EXISTING_ICNS" "$out"
+		ok "Preserved existing game icon"
+		return 0
 	else
 		exe="$(find_ci_file "$SRC_SYS" "deusex.exe" || true)"
 		if [ -n "$exe" ] && extract_pe_icon "$exe" "$TMP/deusex_pe.ico"; then
@@ -630,7 +1081,7 @@ install_original_icon() {
 	fi
 	[ -f "$ico" ] || return 0
 
-	local base="$TMP/orig_icon.png" setdir="$TMP/DeusEx.iconset" out="$APP/Contents/Resources/DeusEx.icns"
+	local base="$TMP/orig_icon.png" setdir="$TMP/DeusEx.iconset"
 	sips -s format png "$ico" --out "$base" >/dev/null 2>&1 || return 0
 	rm -rf "$setdir"
 	mkdir -p "$setdir"
@@ -650,10 +1101,10 @@ install_original_icon
 
 shasum -a 256 "$APP/Contents/MacOS/DXEngine" | awk '{print $1}' > "$APP/Contents/Resources/version.sha"
 
-# Clear stale symlinks inside ~/Library/Application Support/Deus Ex Native if they
-# pointed elsewhere; saves and custom .ini settings stay preserved.
+# Clear stale symlinks inside ~/Library/Application Support/Deus Ex Native so the
+# updated GameData paths re-link cleanly while keeping saves and .ini settings.
 if [ -d "$SUPPORT_DIR" ]; then
-	find "$SUPPORT_DIR" -maxdepth 2 -type l -delete 2>/dev/null || true
+	find "$SUPPORT_DIR" -maxdepth 3 -type l -delete 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -675,12 +1126,10 @@ sign_bundle() {
 		return 0
 	fi
 
-	# Fallback when Xcode Command Line Tools are not installed on this Mac:
-	# use ldid (local or downloaded from repo) and remove stale _CodeSignature.
 	local LDID=""
 	if command -v ldid >/dev/null 2>&1; then
 		LDID="$(command -v ldid)"
-	elif curl -fsSL -o "$TMP/signtool.tar.gz" "$SIGNTOOL_URL" 2>/dev/null; then
+	elif [ -n "${SIGNTOOL_URL:-}" ] && curl -fsSL -o "$TMP/signtool.tar.gz" "$SIGNTOOL_URL" 2>/dev/null; then
 		tar -xzf "$TMP/signtool.tar.gz" -C "$TMP" || return 1
 		xattr -cr "$TMP/signtool" 2>/dev/null || true
 		LDID="$TMP/signtool/ldid"
@@ -697,13 +1146,11 @@ sign_bundle() {
 }
 
 run_task "Ad-hoc signing app bundle" sign_bundle \
-	|| die "signing failed (install Xcode Command Line Tools with 'xcode-select --install' or bundle ldid)"
+	|| die "signing failed (install Xcode Command Line Tools with 'xcode-select --install')"
 
 # ---------------------------------------------------------------------------
-# Step 5: Install to ~/Downloads (and optional .dmg).
+# Step 5: Update existing installation in-place or install to ~/Downloads.
 # ---------------------------------------------------------------------------
-mkdir -p "$DL"
-
 outro() {
 	printf '\n'
 	printf '%s✔ Done!%s %s\n' "$GREEN$BOLD" "$RESET" "$1"
@@ -717,16 +1164,53 @@ outro() {
 }
 
 if [ "$WANT_DMG" = no ]; then
-	step "Installing to $DL"
-	rm -rf "$DL/$APP_NAME.app"
-	mv "$APP" "$DL/$APP_NAME.app"
-	ok "Placed $APP_NAME.app in $DL"
-	outro "$DL/$APP_NAME.app is ready." \
+	if [ -n "$EXISTING_APP" ]; then
+		INSTALL_DIR="$(dirname "$EXISTING_APP")"
+		step "Updating existing $EXISTING_APP${NEW_VER:+ to v$NEW_VER}"
+		STAGED_NEW="$INSTALL_DIR/.${APP_NAME}.app.new.$$"
+		BACKUP_OLD="$INSTALL_DIR/.${APP_NAME}.app.old.$$"
+		if [ -w "$INSTALL_DIR" ] && [ ! -e "$EXISTING_APP" -o -w "$EXISTING_APP" ]; then
+			rm -rf "$STAGED_NEW" "$BACKUP_OLD"
+			mv "$APP" "$STAGED_NEW"
+			mv "$EXISTING_APP" "$BACKUP_OLD"
+			mv "$STAGED_NEW" "$EXISTING_APP"
+			rm -rf "$BACKUP_OLD"
+		elif can_prompt; then
+			ok "Administrator permission needed to update $EXISTING_APP"
+			sudo rm -rf "$STAGED_NEW" "$BACKUP_OLD"
+			sudo mv "$APP" "$STAGED_NEW"
+			sudo mv "$EXISTING_APP" "$BACKUP_OLD"
+			sudo mv "$STAGED_NEW" "$EXISTING_APP"
+			sudo rm -rf "$BACKUP_OLD"
+		else
+			warn "$INSTALL_DIR is not writable; placing updated app in $DL instead"
+			mkdir -p "$DL"
+			rm -rf "$DL/$APP_NAME.app"
+			mv "$APP" "$DL/$APP_NAME.app"
+			EXISTING_APP="$DL/$APP_NAME.app"
+		fi
+		/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$EXISTING_APP" >/dev/null 2>&1 || true
+		ok "Updated $EXISTING_APP${NEW_VER:+ (v$NEW_VER)}"
+		outro "$EXISTING_APP has been updated${NEW_VER:+ to v$NEW_VER}." \
+			"Double-click it to launch (saves and settings preserved)."
+		[ "$FANCY" = yes ] && open -R "$EXISTING_APP" >/dev/null 2>&1 || true
+		exit 0
+	fi
+
+	TARGET_DIR="${DEUS_EX_DEST_DIR:-$DL}"
+	mkdir -p "$TARGET_DIR"
+	step "Installing to $TARGET_DIR"
+	rm -rf "$TARGET_DIR/$APP_NAME.app"
+	mv "$APP" "$TARGET_DIR/$APP_NAME.app"
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$TARGET_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
+	ok "Placed $APP_NAME.app in $TARGET_DIR"
+	outro "$TARGET_DIR/$APP_NAME.app is ready." \
 		"Drag it into /Applications (or double-click it directly) to play."
-	[ "$FANCY" = yes ] && open -R "$DL/$APP_NAME.app" >/dev/null 2>&1 || true
+	[ "$FANCY" = yes ] && open -R "$TARGET_DIR/$APP_NAME.app" >/dev/null 2>&1 || true
 	exit 0
 fi
 
+mkdir -p "$DL"
 step "Building disk image"
 STAGE="$TMP/stage"
 mkdir -p "$STAGE"
