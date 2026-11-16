@@ -197,7 +197,7 @@ usage() {
 Usage: $(basename "$0") [options] [game_files_dir]
 
 Options:
-  -g, --game <path>      Path to your Deus Ex GOTY folder (Steam, GOG, disc, or .app)
+  -g, --game <path>      Path to Deus Ex GOTY folder, .app, or GOG setup_deus_ex*.exe installer
   -r, --revision <path>  Path to Deus Ex: Revision folder or Windows installer (.zip/.exe/.wim),
                          or 'auto' to detect locally / download from dx-revision.com
       --with-revision    Include Deus Ex: Revision (same as --revision auto)
@@ -321,6 +321,9 @@ resolve_game_dir() {
 			"$root/Game Files" \
 			"$root/Deus Ex" \
 			"$root/Deus Ex GOTY" \
+			"$root/app" \
+			"$root/app/Deus Ex" \
+			"$root/app/Deus Ex GOTY" \
 			"$root/drive_c/Program Files/Deus Ex" \
 			"$root/drive_c/Program Files (x86)/Deus Ex" \
 			"$root/drive_c/GOG Games/Deus Ex GOTY" \
@@ -365,6 +368,10 @@ resolve_revision_dir() {
 			"$root/Deus Ex Revision/Revision" \
 			"$root/Deus Ex/Revision" \
 			"$root/Deus Ex GOTY/Revision" \
+			"$root/app/Revision" \
+			"$root/app/Deus Ex Revision/Revision" \
+			"$root/app/Deus Ex/Revision" \
+			"$root/app/Deus Ex GOTY/Revision" \
 			"$root/drive_c/GOG Games/Deus Ex Revision" \
 			"$root/drive_c/GOG Games/Deus Ex Revision/Revision" \
 			"$root/drive_c/GOG Games/Deus Ex GOTY/Revision" \
@@ -424,6 +431,9 @@ collect_install_candidates() {
 				"$lib/steamapps/common/Deus Ex GOTY"
 				"$lib/steamapps/common/Deus Ex Revision"
 			)
+			for depot in "$lib/steamapps/content"/app_*/depot_*; do
+				[ -d "$depot" ] && CAND_DIRS+=("$depot")
+			done
 		done <<EOF
 $(sed -n 's/^[[:space:]]*"path"[[:space:]]*"\([^"]*\)".*/\1/p' "$vdf")
 EOF
@@ -506,7 +516,7 @@ if [ "$(uname -sm)" != "Darwin arm64" ]; then
 	die "this installer is for Apple Silicon Macs (arm64) only"
 fi
 
-TMP=""
+TMP="$(mktemp -d)"
 DEV=""
 cleanup() {
 	kill $(jobs -p) 2>/dev/null || true
@@ -515,6 +525,45 @@ cleanup() {
 	[ "$FANCY" = yes ] && printf '\033[?25h' || true
 }
 trap cleanup EXIT
+
+INNO_BIN=""
+ensure_innoextract() {
+	local label=${1:-the GOG installer}
+	if [ -n "$INNO_BIN" ] && [ -x "$INNO_BIN" ]; then
+		return 0
+	fi
+	if command -v innoextract >/dev/null 2>&1; then
+		INNO_BIN="$(command -v innoextract)"
+		return 0
+	fi
+	if [ -x "$TOOLS_DIR/innoextract" ]; then
+		INNO_BIN="$TOOLS_DIR/innoextract"
+		return 0
+	fi
+	if command -v brew >/dev/null 2>&1; then
+		run_task "Installing innoextract via Homebrew" brew install innoextract \
+			|| die "failed to install innoextract via Homebrew"
+		INNO_BIN="$(command -v innoextract || true)"
+		[ -n "$INNO_BIN" ] && return 0
+	fi
+	die "innoextract is required to unpack $label" \
+		"Install Homebrew (https://brew.sh) and run 'brew install innoextract', then re-run this script," \
+		"or pass an already-extracted Deus Ex GOTY folder via --game."
+}
+
+GOG_EXTRACT_DIR=""
+extract_gog_installer() {
+	local exe=$1
+	ensure_innoextract "$(basename "$exe")"
+	GOG_EXTRACT_DIR="$TMP/gog_inno"
+	rm -rf "$GOG_EXTRACT_DIR"
+	mkdir -p "$GOG_EXTRACT_DIR"
+	run_task "Extracting $(basename "$exe")" "$INNO_BIN" -e -s -d "$GOG_EXTRACT_DIR" "$exe" \
+		|| die "failed to extract GOG installer: $(basename "$exe")"
+	ASSET_SRC="$(resolve_game_dir "$GOG_EXTRACT_DIR" || true)"
+	[ -n "$ASSET_SRC" ] || die "complete Deus Ex GOTY files not found inside: $(basename "$exe")"
+	ok "Extracted GOTY game files from $(basename "$exe")"
+}
 
 # Auto-detect sibling tarball if script is invoked locally without --local.
 SCRIPT_DIR=""
@@ -562,11 +611,17 @@ for app in "${APP_SEARCH_LIST[@]}"; do
 done
 
 if [ -n "$GAME_ARG" ]; then
-	if ! ASSET_SRC="$(resolve_game_dir "$GAME_ARG")"; then
+	if [ -f "$GAME_ARG" ]; then
+		case "$(printf '%s' "$GAME_ARG" | tr '[:upper:]' '[:lower:]')" in
+			*.exe) extract_gog_installer "$GAME_ARG" ;;
+			*) die "expected a Deus Ex GOTY folder, .app, or GOG setup .exe installer: $GAME_ARG" ;;
+		esac
+	elif ! ASSET_SRC="$(resolve_game_dir "$GAME_ARG")"; then
 		die "complete Deus Ex GOTY files not found in: $GAME_ARG" \
-			"Pass the Deus Ex GOTY folder containing System/, Maps/, Textures/, Sounds/, and Music/."
+			"Pass the Deus Ex GOTY folder (System, Maps, Textures, Sounds, Music) or GOG setup_deus_ex*.exe installer."
+	else
+		ok "Using game files from $ASSET_SRC"
 	fi
-	ok "Using game files from $ASSET_SRC"
 elif [ -z "$ASSET_SRC" ]; then
 	for cand in "${CAND_DIRS[@]}"; do
 		if ASSET_SRC="$(resolve_game_dir "$cand")"; then
@@ -595,12 +650,31 @@ elif [ -z "$ASSET_SRC" ]; then
 	fi
 
 	if [ -z "$ASSET_SRC" ]; then
+		GOG_EXE=""
+		for search_root in "$DL" "$HOME/Desktop" "$HOME/Games"; do
+			[ -d "$search_root" ] || continue
+			for cand in "$search_root"/*.exe "$search_root"/*.EXE; do
+				[ -f "$cand" ] || continue
+				case "$(basename "$cand" | tr '[:upper:]' '[:lower:]')" in
+					setup_deus_ex_revision*) continue ;;
+					setup_deus_ex*.exe|deus_ex*.exe)
+						GOG_EXE="$cand"
+						break 2 ;;
+				esac
+			done
+		done
+		if [ -n "$GOG_EXE" ]; then
+			extract_gog_installer "$GOG_EXE"
+		fi
+	fi
+
+	if [ -z "$ASSET_SRC" ]; then
 		die "Deus Ex GOTY game files not found" \
 			"Steam on macOS won't install Deus Ex (Windows-only). Either:" \
 			"  - open steam://open/console and run: download_depot 6910 6911  (then re-run this script), or" \
-			"  - install it via GOG/CrossOver/Whisky, or copy the game folder (System, Maps, Textures, Sounds, Music) to ~/Downloads," \
-			"or pass its path explicitly with --game:" \
-			"  curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/quick-install.sh | bash -s -- --game ~/path/to/\"Deus Ex GOTY\""
+			"  - place your GOG offline installer (setup_deus_ex_goty_*.exe) or game folder in ~/Downloads, or" \
+			"  - pass its path explicitly with --game:" \
+			"    curl -fsSL https://raw.githubusercontent.com/$REPO/$BRANCH/quick-install.sh | bash -s -- --game ~/path/to/\"Deus Ex GOTY\""
 	fi
 fi
 
@@ -624,10 +698,14 @@ find_local_revision() {
 		fi
 	fi
 
-	# 1. Existing Revision alongside ASSET_SRC or inside EXISTING_APP (unless forcing refresh).
+	# 1. Existing Revision alongside ASSET_SRC, inside GOG extract dir, or EXISTING_APP.
 	if [ "$UPDATE_REV" != yes ]; then
 		REV_SRC="$(resolve_revision_dir "$ASSET_SRC" || true)"
 		[ -n "$REV_SRC" ] && return 0
+		if [ -n "$GOG_EXTRACT_DIR" ]; then
+			REV_SRC="$(resolve_revision_dir "$GOG_EXTRACT_DIR" || true)"
+			[ -n "$REV_SRC" ] && return 0
+		fi
 	fi
 
 	# 2. Common Steam / GOG / CrossOver / Whisky / Downloads folders.
@@ -712,7 +790,6 @@ fi
 # ---------------------------------------------------------------------------
 # Step 2: Obtain & unpack engine-only Deus Ex.app.
 # ---------------------------------------------------------------------------
-TMP="$(mktemp -d)"
 APP="$TMP/$APP_NAME.app"
 GDATA="$APP/Contents/Resources/GameData"
 
@@ -879,17 +956,9 @@ install_revision_archive() {
 
 	case "$lower" in
 		setup_deus_ex_revision*.exe)
-			local INNO=""
-			if command -v innoextract >/dev/null 2>&1; then
-				INNO="$(command -v innoextract)"
-			elif command -v brew >/dev/null 2>&1; then
-				run_task "Installing innoextract via Homebrew" brew install innoextract
-				INNO="$(command -v innoextract || true)"
-			fi
-			[ -n "$INNO" ] || die "innoextract is required to unpack GOG installer $(basename "$arc")" \
-				"Install Homebrew + 'brew install innoextract', or re-run with '--with-revision' to download the official zip installer instead."
+			ensure_innoextract "$(basename "$arc")"
 			mkdir -p "$TMP/rev_inno"
-			run_task "Extracting GOG Revision installer" "$INNO" -e -s -d "$TMP/rev_inno" "$arc"
+			run_task "Extracting GOG Revision installer" "$INNO_BIN" -e -s -d "$TMP/rev_inno" "$arc"
 			local extracted
 			extracted="$(resolve_revision_dir "$TMP/rev_inno" || true)"
 			[ -n "$extracted" ] || die "could not find Revision files inside $(basename "$arc")"
@@ -1126,6 +1195,9 @@ install_original_icon() {
 	}
 	local ico="" src_label="" exe="" cand=""
 	ico="$(find -H "$ASSET_SRC" -maxdepth 2 -iname 'goggame-*.ico' -print -quit 2>/dev/null || true)"
+	if [ -z "$ico" ] && [ -n "$GOG_EXTRACT_DIR" ]; then
+		ico="$(find -H "$GOG_EXTRACT_DIR" -maxdepth 3 -iname 'goggame-*.ico' -print -quit 2>/dev/null || true)"
+	fi
 	if [ -z "$ico" ] && [ -n "$EXISTING_APP" ] && [ "$ASSET_SRC" = "$EXISTING_APP/Contents/Resources/GameData" ]; then
 		collect_install_candidates
 		for cand in "${CAND_DIRS[@]}"; do

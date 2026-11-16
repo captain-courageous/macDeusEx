@@ -19,8 +19,11 @@ Re-running the same command later automatically detects your existing **`Deus Ex
 
 ### Game & Revision Options
 
-- **Auto-detected sources:** Steam (including external Steam libraries), GOG, Heroic, CrossOver, Whisky, Porting Kit bottles, `~/Games`, `~/Downloads`, and existing `Deus Ex.app` installs.
-- **Deus Ex: Revision:** Detected automatically if already installed on your Mac/bottles, or pass `--with-revision` to automatically download & extract the official standalone installer from [`dx-revision.com`](https://www.dx-revision.com/download/) (or pass `-r <path>` with any Windows Revision folder, `.zip`, `.wim`, or GOG offline installer `setup_deus_ex_revision_*.exe`):
+- **Auto-detected sources:**
+  - **Steam (via Steam console):** Steam on macOS will not install Windows-only titles directly — open [`steam://open/console`](steam://open/console), run `download_depot 6910 6911`, and the downloaded depot is detected automatically.
+  - **GOG:** Installed GOG folders (Heroic, CrossOver, Whisky, Porting Kit) or a GOG offline installer (`setup_deus_ex_goty_*.exe`) in `~/Downloads` (or passed via `--game`, unpacked automatically with `innoextract`).
+  - **Local / Existing:** CrossOver, Whisky, Porting Kit bottles, `~/Games`, `~/Downloads`, standalone folders, and existing `Deus Ex.app` installs.
+- **Deus Ex: Revision:** Detected automatically if already installed (including GOG installers bundling Revision), or pass `--with-revision` to automatically download & extract the official standalone installer from [`dx-revision.com`](https://www.dx-revision.com/download/) (or pass `-r <path>` with any Windows Revision folder, `.zip`, `.wim`, or GOG offline installer `setup_deus_ex_revision_*.exe`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/captain-courageous/macDeusEx/main/quick-install.sh | bash -s -- --with-revision
